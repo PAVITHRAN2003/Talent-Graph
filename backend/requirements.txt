@@ -1,0 +1,11 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20
+motor==3.6.0
+pymongo==4.9.2
+certifi
+pypdf==5.1.0
+langchain-core>=0.3.30,<0.4
+langchain-groq>=0.2.4,<0.4
+langchain-text-splitters>=0.3.5,<0.4
+langgraph>=0.2.60,<0.7
