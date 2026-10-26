@@ -1,80 +1,212 @@
-# 🎯 TalentGraph — AI Recruiter Screening
+# 🎯 TalentGraph
 
-Bulk-screen **PDF résumés** against **long job descriptions** with a LangGraph pipeline.
-Ranked, explainable results; every run is persisted in MongoDB.
+**AI-powered résumé screening.** Upload a job description and a batch of PDF résumés; TalentGraph scores every candidate against the role, explains its reasoning, and routes each one to **shortlist**, **escalate to a recruiter**, or **reject**, using a [LangGraph](https://langchain-ai.github.io/langgraph/) workflow.
 
+**Live demo:** <https://YOUR-APP.vercel.app> · **API docs:** <https://YOUR-API.onrender.com/docs>
+
+> The demo runs on free hosting tiers. The first request after a period of inactivity can take 30–60 seconds while the backend wakes up.
+
+---
+
+## Features
+
+- **Bulk screening:** up to 25 PDF or TXT résumés per run, processed concurrently in the background with live progress.
+- **Long job descriptions:** paste text or upload a PDF. Large JDs are split into chunks and merged (map-reduce), so length is not a limit.
+- **Structured JD analysis:** extracts the title, seniority, minimum experience, must-have skills and nice-to-have skills.
+- **Explainable results:** each candidate gets a 0–100 fit score, matched and missing skills, strengths, concerns and written reasoning.
+- **Actionable output:** tailored interview questions for shortlisted candidates and draft feedback for rejected ones.
+- **Adjustable threshold:** tune the match cut-off from the UI and compare outcomes.
+- **Run history:** every screening is stored in MongoDB; reopen or delete past runs.
+- **Resilient by design:** per-file error isolation (one bad PDF never fails the batch), scanned-PDF detection, rate-limit-aware concurrency and automatic LLM retries.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Job description<br/>text / PDF] --> B[Analyze JD<br/>map-reduce]
+    B --> C
+    subgraph C[LangGraph pipeline per résumé]
+        direction LR
+        P[parse_resume] --> E[categorize_experience] --> S[assess_skillset] --> R{route}
+        R -->|score ≥ threshold| H[schedule_hr_interview]
+        R -->|Senior-level, below threshold| X[escalate_to_recruiter]
+        R -->|otherwise| J[reject_application]
+    end
 ```
-React (Vercel) ──HTTP──▶ FastAPI (Render) ──▶ LangGraph ──▶ Groq (gpt-oss-120b)
-                              │
-                              └──▶ MongoDB Atlas (batches + candidates)
-```
 
-## LangGraph workflow
-`parse_resume → categorize_experience → assess_skillset → route →`
-`schedule_hr_interview | escalate_to_recruiter | reject_application`
+**Routing rules**
 
-Routing rules (same as the original notebook): Match → shortlist; Senior but no match → escalate; otherwise reject.
-
-## What changed vs. the notebook
-| Notebook | This project |
+| Condition | Decision |
 |---|---|
-| Plain-string input | PDF/TXT upload, text extraction, scanned-PDF detection |
-| Hardcoded "Python Developer" | JD is parsed into structured requirements (must-have/nice-to-have, years, seniority) |
-| Short JD only | Long JDs → chunked **map-reduce** extraction |
-| LLM says "Match"/"No Match" (brittle string compare) | **Structured output** (Pydantic) → 0-100 score; match = score ≥ adjustable threshold |
-| One candidate at a time | Up to 25 résumés, concurrent with a semaphore (respects Groq rate limits), background job + polling |
-| No persistence | MongoDB: history, re-open, delete |
-| print() output | Explainable UI: matched/missing skills, strengths, concerns, interview questions, rejection feedback |
+| Score ≥ threshold (default 70) | Shortlist, with interview questions |
+| Below threshold and Senior-level | Escalate to a human recruiter |
+| Below threshold and not Senior-level | Reject, with draft feedback |
 
-## Run locally
-```bash
-# backend
-cd backend && python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # fill GROQ_API_KEY + MONGODB_URI, then:
-export $(grep -v '^#' .env | xargs)
-uvicorn app.main:app --reload            # http://localhost:8000/docs
+Every LLM call returns a **Pydantic-validated structured object**, so routing never depends on parsing free text. The match decision is derived deterministically from the score.
 
-# frontend (new terminal)
-cd frontend && npm install && cp .env.example .env && npm run dev   # http://localhost:5173
+## Architecture
+
+```
+React + Vite (Vercel) ──HTTPS──▶ FastAPI (Render) ──▶ LangGraph ──▶ Groq (gpt-oss-120b)
+                                      │
+                                      └──▶ MongoDB Atlas (batches, candidates)
 ```
 
-## Deploy
+Screening a batch takes minutes, so `POST /api/batches` returns `202 Accepted` with a batch ID immediately. The work runs in the background and the frontend polls for progress.
 
-### 1. MongoDB Atlas (free)
-1. Create an M0 cluster at cloud.mongodb.com.
-2. **Database Access** → add a user + password.
-3. **Network Access** → add `0.0.0.0/0` (Render free has no static IP).
-4. **Connect → Drivers** → copy the URI, replace `<password>`. That is `MONGODB_URI`.
+## Tech stack
 
-### 2. Backend on Render
-1. Push this repo to GitHub.
-2. Render → **New → Web Service** → pick the repo. (Or **New → Blueprint** to use `render.yaml`.)
-3. Settings: **Root Directory** `backend` · **Build** `pip install -r requirements.txt` · **Start** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-4. **Environment variables**: `PYTHON_VERSION=3.12.8`, `GROQ_API_KEY`, `MONGODB_URI`, `CORS_ORIGINS=http://localhost:5173` (update in step 4).
-5. Deploy; open `https://<name>.onrender.com/api/health` → `{"status":"ok","db":"up"}`.
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite |
+| Backend | FastAPI, Uvicorn, Pydantic |
+| Orchestration | LangGraph, LangChain |
+| LLM | Groq (`openai/gpt-oss-120b`) |
+| PDF parsing | pypdf |
+| Database | MongoDB Atlas (Motor async driver) |
+| Hosting | Vercel (frontend), Render (backend) |
 
-### 3. Frontend on Vercel
-1. Vercel → **Add New → Project** → import the same repo.
-2. **Root Directory** `frontend` (framework auto-detects Vite; build `npm run build`, output `dist`).
-3. **Environment variable**: `VITE_API_URL=https://<name>.onrender.com` (no trailing slash).
-4. Deploy → you get `https://<project>.vercel.app`.
+## Project structure
 
-### 4. Connect them (CORS)
-Render → your service → Environment → set
-`CORS_ORIGINS=https://<project>.vercel.app` (comma-separate to keep localhost too) → it redeploys.
-Vite env vars are baked in at build time, so if you change `VITE_API_URL`, redeploy Vercel.
+```
+.
+├── backend/
+│   ├── app/
+│   │   ├── main.py       # FastAPI routes, background batch runner
+│   │   ├── graph.py      # LangGraph screening workflow
+│   │   ├── jd.py         # Long-JD analysis (chunk + merge)
+│   │   ├── pdf.py        # PDF/TXT text extraction
+│   │   ├── llm.py        # Structured-output LLM helper
+│   │   ├── schemas.py    # Pydantic models
+│   │   ├── db.py         # MongoDB connection
+│   │   └── config.py     # Environment configuration
+│   ├── requirements.txt
+│   └── .env.example
+├── frontend/
+│   ├── src/              # React app (App.jsx, api.js, styles.css)
+│   └── .env.example
+└── render.yaml           # Render blueprint
+```
 
-### Gotchas
-- Render free instances sleep after ~15 min idle; first request takes ~30-50 s. **Open the site once before your interview**, or ping `/api/health` with a free uptime monitor.
-- Free Render restarts can interrupt a running batch; the UI will show it stuck at "screening". For production you'd move to a queue (Celery/RQ) or Render background worker.
-- Scanned (image-only) PDFs are rejected with a clear message; adding OCR (Tesseract) is a natural extension.
-- Groq free tier has rate limits: tune `LLM_CONCURRENCY` (default 3).
+## Getting started
 
-## Interview talking points
-- **Why LangGraph?** Explicit state machine, conditional edges, each node testable in isolation; easy to add human-in-the-loop on the "escalate" branch.
-- **Why structured output?** Eliminates string-parsing failures (the notebook's `"Match"` comparison and `*` stripping hack).
-- **Why map-reduce for JDs?** Bounded context per call, parallelizable, scales to arbitrarily long JDs.
-- **Why background tasks + polling?** Screening 25 résumés takes minutes; HTTP requests would time out. Returns `202` + batch id.
-- **Bias/fairness:** the prompt scores only on evidenced skills and experience, never on name/gender/age; a human reviews the escalate branch. Mention audit trail in MongoDB.
-- **Next steps:** OCR, embeddings pre-filter for 1000s of résumés, auth, queue/worker, email integration, LangSmith tracing.
+### Prerequisites
+
+- Python 3.12+ and Node.js 18+
+- A [Groq API key](https://console.groq.com/keys)
+- A [MongoDB Atlas](https://www.mongodb.com/atlas) cluster (the free M0 tier is enough)
+
+### 1. Backend
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -r requirements.txt
+
+cp .env.example .env               # then edit .env with your keys
+export $(grep -v '^#' .env | xargs)    # macOS/Linux; loads variables into this shell
+
+python -m uvicorn app.main:app --reload
+```
+
+Verify it at <http://localhost:8000/api/health>. You should see `{"status":"ok","db":"up"}`. Interactive API docs are at <http://localhost:8000/docs>.
+
+### 2. Frontend
+
+```bash
+cd frontend
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Open <http://localhost:5173>.
+
+## Configuration
+
+**Backend** (`backend/.env`)
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `GROQ_API_KEY` | Yes | — | Groq API key |
+| `MONGODB_URI` | Yes | — | MongoDB Atlas connection string |
+| `MONGODB_DB` | No | `talentgraph` | Database name |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model ID |
+| `CORS_ORIGINS` | No | `http://localhost:5173` | Comma-separated list of allowed frontend origins |
+| `LLM_CONCURRENCY` | No | `3` | Max parallel LLM pipelines (tune to your Groq rate limit) |
+
+**Frontend** (`frontend/.env`)
+
+| Variable | Description |
+|---|---|
+| `VITE_API_URL` | Base URL of the backend, with no trailing slash |
+
+## API reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/health` | Service and database status |
+| `POST` | `/api/batches` | Start a screening run. `multipart/form-data` with `resumes` (files), `jd_text` or `jd_file`, and optional `threshold` (0–100). Returns `202` with `batch_id` |
+| `GET` | `/api/batches` | List recent runs |
+| `GET` | `/api/batches/{id}` | Run status, parsed JD and ranked candidates |
+| `DELETE` | `/api/batches/{id}` | Delete a run and its candidates |
+
+**Limits:** 25 résumés per run, 10 MB per file, PDF or TXT only. Scanned (image-only) PDFs are rejected with a clear message.
+
+## Deployment
+
+### MongoDB Atlas
+
+1. Create a project and a free **M0** cluster.
+2. **Database Access:** add a user with a password.
+3. **Network Access:** allow `0.0.0.0/0`, because Render's free tier has no static IP.
+4. **Connect → Drivers:** copy the connection string and substitute your password.
+
+### Backend on Render
+
+1. **New → Web Service**, then select this repository.
+2. Settings:
+   - **Root Directory:** `backend`
+   - **Build Command:** `pip install -r requirements.txt`
+   - **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Health Check Path:** `/api/health`
+3. Environment variables: `PYTHON_VERSION=3.12.8`, `GROQ_API_KEY`, `MONGODB_URI`, `MONGODB_DB`, `CORS_ORIGINS`.
+
+A `render.yaml` blueprint is included as an alternative.
+
+### Frontend on Vercel
+
+1. **Add New → Project**, then import this repository.
+2. **Root Directory:** `frontend` (the Vite preset is detected automatically).
+3. Environment variable: `VITE_API_URL=https://<your-service>.onrender.com`.
+
+### Connect the two
+
+Set `CORS_ORIGINS` on Render to your Vercel URL (for example `https://your-app.vercel.app`). Vite variables are baked in at build time, so redeploy the frontend whenever `VITE_API_URL` changes.
+
+## Security and privacy
+
+- Secrets live only in environment variables. `.env` files are git-ignored.
+- **The demo has no authentication.** Anyone with the link can view runs. Do not upload real personal data to a public deployment; use synthetic résumés.
+- Scoring prompts are limited to evidenced skills and experience. Automated output is decision support: the escalation path keeps a human recruiter in the loop, and final hiring decisions should always be made by people.
+
+## Known limitations
+
+- Runs execute inside the API process. A server restart mid-run leaves that run unfinished. A worker queue (Celery, RQ) would address this at scale.
+- No OCR yet, so scanned résumés are not supported.
+- LLM scoring is non-deterministic, so scores can vary slightly between runs.
+
+## Roadmap
+
+- [ ] OCR for scanned PDFs
+- [ ] DOCX résumé support
+- [ ] Authentication and per-user workspaces
+- [ ] Embedding-based pre-filter for large applicant pools
+- [ ] Persistent job queue and worker
+- [ ] CSV/PDF export of shortlists
+- [ ] Observability with LangSmith
+
+## License
+
+Released under the [MIT License](LICENSE).
